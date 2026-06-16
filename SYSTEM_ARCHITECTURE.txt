@@ -1,0 +1,589 @@
+================================================================================
+          VOICE CRISIS DETECTOR — SYSTEM ARCHITECTURE DOCUMENTATION
+================================================================================
+
+PROJECT: DeepEmotion AI — Real-Time Voice Emotion Detection & Emergency Alert System
+LOCATION: C:\Users\rohit\OneDrive\Desktop\emotion_detector
+VERSION: 1.0
+DATE: 2026-05-24
+
+================================================================================
+                           TABLE OF CONTENTS
+================================================================================
+
+1. SYSTEM OVERVIEW
+2. HIGH-LEVEL ARCHITECTURE DIAGRAM
+3. COMPONENT BREAKDOWN
+4. DATA FLOW DIAGRAM
+5. STEP-BY-STEP PROCESS WALKTHROUGH
+6. API ENDPOINTS
+7. ML MODEL ARCHITECTURE
+8. TECHNOLOGY STACK
+9. FILE STRUCTURE
+
+================================================================================
+                      1. SYSTEM OVERVIEW
+================================================================================
+
+DeepEmotion AI is a real-time voice emotion detection system designed to identify
+emotional distress in audio recordings. It combines a CNN-based emotion classifier
+with a distress scoring engine, speech-to-text transcription, and sentiment analysis
+to provide comprehensive emotional state assessment.
+
+KEY FEATURES:
+- Real-time voice recording and analysis
+- File upload for batch processing (WAV, MP3, OGG, FLAC, M4A, WebM)
+- 8-class emotion classification (neutral, calm, happy, sad, angry, fearful,
+  disgust, surprised)
+- Distress scoring (0-100) with 4 risk levels (low, medium, high, critical)
+- Escalation detection (rising/decreasing emotional trends)
+- Speech-to-text transcription via Whisper (OpenAI)
+- Sentiment analysis via XLM-RoBERTa (cardiffnlp/twitter-xlm-roberta-base-sentiment)
+- Hidden distress detection from speech content
+- Browser notifications for critical/high risk alerts
+- Session tracking and dashboard analytics
+
+================================================================================
+                 2. HIGH-LEVEL ARCHITECTURE DIAGRAM
+================================================================================
+
+                           ┌─────────────────────────────────┐
+                           │       CLIENT / FRONTEND          │
+                           │   (HTML + JavaScript + CSS)      │
+                           │   - Live Monitor Tab              │
+                           │   - File Upload Tab               │
+                           │   - Live Recording Tab            │
+                           │   - Dashboard Tab                │
+                           │   - Settings Tab                 │
+                           │                                  │
+                           │   [Chart.js for visualizations]  │
+                           │   [Web Audio API for recording]  │
+                           └────────────────┬──────────────────┘
+                                            │
+                                   HTTP/REST API
+                                   (Flask :5000)
+                                            │
+                    ┌───────────────────────┼───────────────────────┐
+                    │                       │                       │
+          ┌─────────▼─────────┐ ┌──────────▼──────────┐ ┌─────────▼─────────┐
+          │  AUDIO PROCESSING │ │   ML ENGINE        │ │  SESSION MGMT    │
+          │                   │ │                    │ │                   │
+          │ - Librosa loading │ │ - Keras CNN Model  │ │ - SessionTracker  │
+          │ - FFmpeg convert  │ │   (Emotion VAD)   │ │ - History buffer  │
+          │ - MFCC extraction  │ │ - Scaler (std)    │ │ - Timeline stats │
+          │ - Spectrogram gen │ │ - DistressEngine  │ │ - AlertManager    │
+          │ - Waveform gen    │ │ - SpeechToText    │ │                   │
+          │                   │ │   (Whisper)       │ │                   │
+          │                   │ │ - Sentiment       │ │                   │
+          │                   │ │   (XLM-RoBERTa)   │ │                   │
+          └─────────┬─────────┘ └──────────┬──────────┘ └─────────┬─────────┘
+                    │                       │                       │
+          ┌─────────▼─────────┐ ┌──────────▼──────────┐           │
+          │  FILE SYSTEM      │ │   MODEL FILES       │           │
+          │                   │ │                    │           │
+          │ - uploads/        │ │ - Emotion_Voice_   │           │
+          │   (temp audio)    │ │   Detection_Model  │           │
+          │ - models/         │ │   .h5              │           │
+          │   (saved assets)  │ │ - scaler.pkl       │           │
+          └───────────────────┘ └────────────────────┘           │
+
+================================================================================
+                      3. COMPONENT BREAKDOWN
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        FRONTEND (templates/index.html)                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tech: HTML5, CSS3 (custom properties, flex/grid), JavaScript ES6+           │
+│                                                                             │
+│ TABS:                                                                        │
+│  • Live Monitor  — Real-time microphone + distress gauge + timeline chart   │
+│  • File Upload   — Drag-and-drop audio file + full analysis                 │
+│  • Live Recording— Record button + WebM → analyze                          │
+│  • Dashboard     — Session stats, emotion distribution, risk breakdown       │
+│  • Settings      — Emergency contacts, distress thresholds, model info       │
+│                                                                             │
+│ FRONTEND COMPONENTS:                                                        │
+│  • Waveform Visualizer  — Canvas-based real-time audio waveform display    │
+│  • Distress Gauge       — Canvas-drawn arc gauge (0-100)                  │
+│  • Emotion Timeline     — Chart.js line chart (last 60 predictions)         │
+│  • Probability Bars     — Animated CSS bars for all 8 emotion classes       │
+│  • Spectrogram Viewer   — Base64 PNG of mel-spectrogram + waveform toggle  │
+│  • Emergency Banner     — Animated alert for critical/high risk detection  │
+│  • Hidden Distress Alert— STT keyword detection warning                    │
+│                                                                             │
+│ CLIENT-SIDE STATE:                                                          │
+│  - selectedFile, recordedBlob (Blob), isRecording (bool)                  │
+│  - monitorActive, monitorInterval, monitorStream (MediaStream)            │
+│  - sessionTimeline[], currentResult, currentLanguage                       │
+│  - dashboardChart, monitorChart (Chart.js instances)                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           BACKEND (app.py)                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Tech: Python 3.11, Flask 3.0+, Flask-CORS                                   │
+│                                                                             │
+│ MODEL LOADING (at startup, before Flask fork):                              │
+│  1. build_model() — creates CNN with exact architecture from trainer        │
+│  2. model.load_weights() — loads Emotion_Voice_Detection_Model.h5           │
+│  3. joblib.load(scaler.pkl) — loads StandardScaler for feature normalization│
+│  • Falls back to 3 alternative paths if model not found                   │
+│  • Sets model_loaded=False if no model found (demo mode activates)         │
+│                                                                             │
+│ CORE CLASSES:                                                               │
+│                                                                             │
+│ DistressEngine                                                              │
+│  - DISTRESS_WEIGHTS = {fearful:1.0, angry:0.7, sad:0.6, disgust:0.4,       │
+│                        surprised:0.2, neutral:0, calm:0, happy:0}         │
+│  - compute(probabilities) → distress_score (0-100), risk_level,             │
+│    alert_triggered bool                                                   │
+│  - detect_escalation(timeline) → escalating bool, trend, velocity           │
+│                                                                             │
+│ SpectrogramGenerator                                                       │
+│  - generate_spectrogram(audio_path) → base64 PNG (waveform + mel spec)     │
+│  - generate_waveform(audio_path) → base64 PNG                              │
+│  - Uses matplotlib with Agg backend (non-GUI)                              │
+│                                                                             │
+│ SpeechToTextEngine (lazy-loaded on first use, not at startup):            │
+│  - whisper.load_model("small") — STT model                                 │
+│  - pipeline("sentiment-analysis") — XLM-RoBERTa sentiment                  │
+│  - transcribe(audio_path, language) → text, sentiment, hidden_distress      │
+│  - _detect_hidden_distress(text, sentiment) — keyword matching for:        │
+│      emergency, fear, danger, pain, panic categories                       │
+│                                                                             │
+│ SessionTracker                                                             │
+│  - Thread-safe (Lock) history deque                                        │
+│  - add(prediction) — appends emotion + distress + timestamp                │
+│  - get_summary() → total_predictions, dominant_emotion, avg_confidence,     │
+│      max_distress_score, risk_distribution, emotion_distribution,         │
+│      timeline (last 60), escalation                                        │
+│                                                                             │
+│ EmergencyAlertManager                                                       │
+│  - trigger(data) — logs alert with timestamp + risk level                  │
+│  - get_recent(limit) — returns last N alerts                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       AUDIO PROCESSING PIPELINE                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│ STEP 1: FILE UPLOAD / RECORDING                                            │
+│  • Browser records audio via MediaRecorder (audio/webm MIME type)          │
+│  • For file uploads: saved to uploads/ directory                           │
+│  • For live recordings: saved as temp WebM then converted                   │
+│                                                                             │
+│ STEP 2: FORMAT CONVERSION (convert_to_wav)                                  │
+│  • FFmpeg path: C:\Users\rohit\AppData\Local\Temp\ffmpeg-master-latest...\ │
+│  • Conversion: input → -ar 22050 -ac 1 (mono, 22.05kHz) WAV output        │
+│  • Fallback: system PATH ffmpeg if master not found                       │
+│                                                                             │
+│ STEP 3: FEATURE EXTRACTION (extract_features)                              │
+│  • librosa.load(file_path, sr=22050, duration=3.0, offset=0.0,           │
+│                  res_type='kaiser_fast')                                   │
+│  • mfccs = librosa.feature.mfcc(y=audio, sr=22050, n_mfcc=40)            │
+│  • np.mean(mfccs.T, axis=0) → 40-element feature vector                    │
+│  • Returns shape (1, 40, 1) — matches model input                          │
+│                                                                             │
+│ STEP 4: PREDICTION                                                          │
+│  • If model_loaded: model.predict(features_scaled) → probability vector    │
+│  • Scaler applied if scaler.pkl exists (StandardScaler.transform)         │
+│  • If no model: random Dirichlet distribution (demo mode)                  │
+│  • argmax → emotion class, max prob → confidence                           │
+│                                                                             │
+│ STEP 5: DISTRESS SCORING                                                   │
+│  • DistressEngine.compute(prob_map)                                        │
+│  • Weighted sum of emotion probabilities × distress weights               │
+│  • Threshold: <40=low, 40-59=medium, 60-79=high, >=80=critical            │
+│                                                                             │
+│ STEP 6: SPECTROGRAM GENERATION                                              │
+│  • SpectrogramGenerator.generate_spectrogram (waveform + mel spec)       │
+│  • SpectrogramGenerator.generate_waveform (waveform only)                 │
+│  • matplotlib figures → BytesIO → base64 PNG encoding                     │
+│                                                                             │
+│ STEP 7: SPEECH TRANSCRIPTION (on demand)                                   │
+│  • Only if audio_duration >= 1.5 seconds and stt_engine.model loaded        │
+│  • whisper.log_mel_spectrogram(audio, n_mels) → mel spectrogram          │
+│  • model.decode(mel, language=language, task='transcribe')                │
+│  • Sentiment analysis on transcribed text                                 │
+│  • Hidden distress detection via keyword matching                         │
+│                                                                             │
+│ STEP 8: SESSION TRACKING                                                    │
+│  • session_tracker.add(result) — stores in history                         │
+│  • alert_manager.trigger(result) if alert_triggered==True               │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                      4. DATA FLOW DIAGRAM
+================================================================================
+
+  ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+  │  AUDIO   │────▶│ CONVERT  │────▶│ EXTRACT  │────▶│  PREDICT │────▶│  SCORE   │
+  │ (file/   │     │  WAV     │     │  MFCCs   │     │ EMOTION  │     │ DISTRESS │
+  │  live)   │     │(ffmpeg)  │     │ (librosa)│     │  (CNN)   │     │ (Engine) │
+  └──────────┘     └──────────┘     └──────────┘     └──────────┘     └──────────┘
+                                                                         │
+                                          ┌────────────────────────────────┘
+                                          ▼
+  ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+  │SPECTRO- │◀────│  GEN     │◀────│ TRANSCRIBE│◀──│ STT      │◀────│ AUDIO    │
+  │GRAM PNG │     │ (matplotlib│   │ +SENTIMENT│   │ (Whisper)│     │(>=1.5s)  │
+  └──────────┘     └──────────┘     └──────────┘     └──────────┘     └──────────┘
+        │                                   │
+        │               ┌───────────────────┘
+        ▼               ▼
+  ┌──────────────────────────────────────────────────────┐
+  │                  RESULT DICT                           │
+  │  emotion, confidence, emoji, color, description,      │
+  │  probabilities, top3, demo_mode,                      │
+  │  distress_score, risk_level, risk_color, risk_label,   │
+  │  alert_triggered, spectrogram, waveform,              │
+  │  audio_properties, transcript (optional)              │
+  └──────────────────────────────────────────────────────┘
+        │
+        ▼
+  ┌──────────┐     ┌──────────┐     ┌──────────┐
+  │ SESSION  │────▶│  ALERT   │────▶│ BROWSER  │
+  │ TRACKER  │     │ MANAGER  │     │ NOTIFY   │
+  └──────────┘     └──────────┘     └──────────┘
+
+================================================================================
+                 5. STEP-BY-STEP PROCESS WALKTHROUGH
+================================================================================
+
+SCENARIO: User uploads an audio file for full analysis
+──────────────────────────────────────────────────────
+
+STEP 1: User Interface
+  • User navigates to "File Upload" tab
+  • User drags and drops an audio file (or clicks to browse)
+  • File validates: must be .wav, .mp3, .ogg, .flac, .m4a, or .webm
+  • File size must be < 50MB (Flask MAX_CONTENT_LENGTH)
+  • File Selected UI appears with filename and size
+
+STEP 2: User clicks "Full Analysis"
+  • Button enters loading state (spinner + disabled)
+  • POST /api/analyze/full with FormData (audio file + language)
+
+STEP 3: Backend receives file
+  • request.files['audio'] retrieved
+  • secure_filename applied to prevent path traversal
+  • File saved to uploads/{timestamp}_{original_filename}
+
+STEP 4: Format Conversion
+  • Temporary .webm file created at temp path
+  • convert_to_wav() called with ffmpeg path
+  • ffmpeg -y -i {input} -ar 22050 -ac 1 {output}.wav
+  • Validates: returncode==0 AND output exists AND size>0
+  • If fails: error returned to user
+
+STEP 5: Audio Properties
+  • get_audio_properties(wav_path) using librosa
+  • Returns: {duration, sample_rate, samples}
+
+STEP 6: Emotion Prediction
+  • extract_features(wav_path) → 40 MFCC features
+  • If model_loaded:
+    - scaler.transform(features.reshape(1,-1))
+    - model.predict(features_scaled.reshape(1,40,1))
+    - probabilities array → 8 emotion classes
+  • If no model: random Dirichlet (demo mode)
+  • Result: emotion name, confidence %, all probabilities, top3
+
+STEP 7: Distress Scoring
+  • DistressEngine.compute(probabilities_dict)
+  • Each emotion weight × probability → sum × 100
+  • Assigns risk_level: low/medium/high/critical
+  • Sets alert_triggered if level in (high, critical)
+
+STEP 8: Spectrogram Generation
+  • SpectrogramGenerator.generate_spectrogram(wav_path):
+    - librosa.load(wav_path, sr=22050)
+    - librosa.display.waveshow → waveform subplot
+    - librosa.feature.melspectrogram → mel spec subplot
+    - plt.savefig(format='png', base64 encoded)
+  • SpectrogramGenerator.generate_waveform(wav_path):
+    - Same but single waveform subplot only
+
+STEP 9: Speech-to-Text (if duration >= 1.5s and Whisper loaded)
+  • stt_engine.transcribe(wav_path, language='en')
+  • audio resampled to 16000Hz for Whisper
+  • log_mel_spectrogram computed (n_mels from model.dims.n_mels)
+  • Pad/truncate to model.dims.n_audio_ctx
+  • model.decode(mel, language, task='transcribe')
+  • _analyze_sentiment(transcribed_text):
+    - _normalize_hinglish(text) — adds English equivalents for Hinglish
+    - sentiment_analyzer(normalized_text[:512])
+    - Returns label (positive/negative/neutral) + score
+  • _detect_hidden_distress(text, sentiment):
+    - Check keywords in: emergency, fear, danger, pain, panic categories
+    - detected = len(indicators) > 0 OR sentiment['label']=='negative'
+
+STEP 10: Session Update
+  • session_tracker.add(result) — appends to history with timestamp
+  • If alert_triggered: alert_manager.trigger(result)
+  • Result JSON assembled and returned
+
+STEP 11: Frontend Renders Result
+  • showResult(data) called
+  • --emotion-color CSS variable set on hero
+  • Distress score and risk badge updated
+  • All 8 probability bars animated (width: 0% → target%)
+  • Audio info grid populated (duration, sample rate, source)
+  • Top 3 predictions displayed
+  • Spectrogram/waveform images shown (toggleable)
+  • Transcript panel shown if transcript exists
+  • Hidden distress alert shown if detected
+  • Emergency banner shown if alert_triggered
+  • Browser notification sent if permission granted
+  • Result section scrolls into view
+
+STEP 12: Cleanup
+  • uploads/{timestamp}_{filename} deleted via os.remove
+  • Temporary WebM and WAV files deleted in finally block
+
+================================================================================
+                      6. API ENDPOINTS
+================================================================================
+
+GET  /                     → render_template('index.html', model_loaded=...)
+GET  /api/status           → {model_loaded, demo_mode, emotions, emotion_meta,
+                              risk_levels, emergency_contacts, stt_available,
+                              stt_status, scaler_loaded}
+
+POST /api/predict/file     → multipart/form-data: audio file
+                           ← {emotion, confidence, emoji, color, description,
+                              probabilities, top3, demo_mode, distress_score,
+                              risk_level, risk_color, risk_label, alert_triggered,
+                              spectrogram, waveform, audio_properties, filename}
+
+POST /api/predict/live     → multipart/form-data: audio blob (webm)
+                           ← Same as /api/predict/file
+
+POST /api/analyze/full     → multipart/form-data: audio + language
+                           ← All fields from /api/predict/file PLUS transcript
+                           ← Only runs STT if duration >= 1.5s AND Whisper loaded
+
+POST /api/transcribe       → multipart/form-data: audio + language
+                           ← {text, language, sentiment, hidden_distress, segments}
+
+POST /api/analyze/distress → JSON: {probabilities: {...}}
+                           ← {distress_score, risk_level, risk_color, risk_label,
+                              alert_triggered, breakdown}
+
+GET  /api/session/summary  → {total_predictions, session_duration_seconds,
+                              dominant_emotion, avg_confidence, max_distress_score,
+                              current_risk_level, risk_distribution{},
+                              emotion_distribution{}, timeline[], escalation}
+
+GET  /api/session/history  → ?limit=N → list of past predictions
+
+POST /api/session/clear    → clears session_tracker and alert_manager
+                           ← {status: 'cleared'}
+
+GET  /api/emotions         → EMOTION_META dict
+
+GET  /api/emergency/alerts → ?limit=N → {alerts: [...]}
+
+POST /api/emergency/trigger → JSON data → {alert, timestamp}
+
+GET  /api/visualize/spectrogram/[filename] → {spectrogram: base64}
+GET  /api/visualize/spectrogram?data=... → {spectrogram: base64}
+
+================================================================================
+                      7. ML MODEL ARCHITECTURE
+================================================================================
+
+TRAINING (model_trainer.py):
+────────────────────────────
+Dataset: RAVDESS (Ryerson Audio-Visual Database of Emotional Speech and Song)
+- 8 emotions: neutral, calm, happy, sad, angry, fearful, disgust, surprised
+- File naming: {modality}-{channel}-{emotion}-{intensity}-{statement}-{repetition}-{actor}.wav
+
+Training Process:
+1. Load all .wav files from dataset path
+2. For each file:
+   - extract_features(file_path) → 40 MFCCs (kaiser_fast, offset=0.0)
+   - augment_audio(file_path) → 4 augmented versions:
+     * Time stretch: rate=0.9 and rate=1.1
+     * Pitch shift: n_steps=-2 and n_steps=2
+     * Add noise: noise_factor=0.005
+   - So 1 file → 5 samples (1 original + 4 augmented)
+3. Data split: 80% train, 20% test (stratified)
+4. StandardScaler fit on X_train, transform X_test
+5. Class weights computed for imbalanced data
+6. One-hot encode labels (8 classes)
+7. Reshape to (samples, 40, 1) for CNN
+
+Model Architecture (build_model):
+┌─────────────────────────────────────────────────────────────────┐
+│  Input: (40, 1)  — 40 MFCC features, 1 channel                   │
+│                                                                 │
+│  Block 1:                                                       │
+│    Conv1D(256, kernel=3, padding='same') + L2(1e-4)            │
+│    BatchNormalization                                          │
+│    Activation('relu')                                          │
+│    Dropout(0.3)                                                │
+│    MaxPooling1D(pool_size=2)                                   │
+│                                                                 │
+│  Block 2:                                                       │
+│    Conv1D(128, kernel=3, padding='same') + L2(1e-4)            │
+│    BatchNormalization                                          │
+│    Activation('relu')                                          │
+│    Dropout(0.3)                                                │
+│    MaxPooling1D(pool_size=2)                                   │
+│                                                                 │
+│  Block 3:                                                       │
+│    Conv1D(64, kernel=3, padding='same') + L2(1e-4)             │
+│    BatchNormalization                                          │
+│    Activation('relu')                                          │
+│    Dropout(0.3)                                                │
+│                                                                 │
+│  Flatten                                                        │
+│  Dense(128) + L2(1e-4) + BatchNorm + Activation('relu') + Dropout(0.4)
+│  Dense(8, activation='softmax')                                │
+└─────────────────────────────────────────────────────────────────┘
+
+Training Config:
+  • Optimizer: Adam (lr=0.001)
+  • Loss: categorical_crossentropy
+  • Batch size: 64
+  • Max epochs: 100
+  • EarlyStopping: patience=15, restore_best_weights
+  • ReduceLROnPlateau: factor=0.5, patience=5, min_lr=1e-6
+  • Validation split: 10%
+
+Output: Emotion_Voice_Detection_Model.h5 + scaler.pkl
+
+INFERENCE (app.py — simplified model):
+┌─────────────────────────────────────────────────────────────────┐
+│  Input: (40, 1)  — MFCC features from librosa                   │
+│                                                                 │
+│  Conv1D(128, kernel=5, padding='same')                         │
+│  Activation('relu')                                            │
+│  Dropout(0.1)                                                  │
+│  MaxPooling1D(pool_size=8, strides=8)                         │
+│                                                                 │
+│  Conv1D(128, kernel=5, padding='same')                         │
+│  Activation('relu')                                            │
+│  Dropout(0.1)                                                  │
+│                                                                 │
+│  Flatten                                                        │
+│  Dense(8, activation='softmax')                                │
+└─────────────────────────────────────────────────────────────────┘
+
+NOTE: The inference model in app.py is a SIMPLIFIED version of the training
+model. The full training model has 3 conv blocks + batch norm + dense layers.
+The inference model in app.py only has 2 conv blocks without batch norm.
+This is the deployed inference architecture.
+
+EMOTION CLASSES (index → label):
+  0: neutral   4: angry
+  1: calm       5: fearful
+  2: happy      6: disgust
+  3: sad        7: surprised
+
+DISTRESS WEIGHTS (emotion → weight):
+  fearful:  1.0  (highest — primary distress indicator)
+  angry:    0.7
+  sad:      0.6
+  disgust:  0.4
+  surprised:0.2
+  neutral:  0.0
+  calm:     0.0
+  happy:    0.0
+
+DISTRESS THRESHOLDS:
+  low:      < 40
+  medium:   40–59
+  high:     60–79
+  critical: >= 80
+
+================================================================================
+                      8. TECHNOLOGY STACK
+================================================================================
+
+LANGUAGE & FRAMEWORK:
+  • Python 3.11 (primary backend)
+  • Flask 3.0+ (web framework)
+  • Flask-CORS 4.0+ (cross-origin resource sharing)
+
+AUDIO PROCESSING:
+  • librosa 0.10+ (MFCC extraction, audio loading, spectrogram generation)
+  • soundfile 0.12+ (audio file I/O)
+  • scipy 1.11+ (signal processing)
+  • numpy (array operations)
+  • matplotlib 3.7+ (spectrogram/waveform visualization with Agg backend)
+
+MACHINE LEARNING:
+  • TensorFlow 2.15+ (Keras CNN model)
+  • scikit-learn 1.3+ (StandardScaler, train_test_split, classification_report)
+  • joblib 1.3+ (model serialization for scaler)
+
+SPEECH PROCESSING:
+  • openai-whisper 20231117 (speech-to-text transcription)
+  • transformers 4.35+ (XLM-RoBERTa sentiment analysis via pipeline)
+  • torch 2.0+ (required by transformers)
+
+FRONTEND:
+  • HTML5 (semantic structure)
+  • CSS3 (custom properties, flexbox, grid, animations, keyframes)
+  • Vanilla JavaScript ES6+ (no framework)
+  • Chart.js 4.4.0 (CDN — timeline charts and gauges)
+  • Web Audio API (microphone recording, real-time waveform)
+  • MediaRecorder API (browser audio recording)
+  • Canvas API (custom gauge and waveform drawing)
+
+EXTERNAL SERVICES:
+  • Whisper small model (OpenAI) — local inference, no API key needed
+  • cardiffnlp/twitter-xlm-roberta-base-sentiment — HuggingFace transformers
+
+================================================================================
+                      9. FILE STRUCTURE
+================================================================================
+
+emotion_detector/
+│
+├── app.py                      # Main Flask application
+│   ├── DistressEngine          # Computes distress scores from emotion probs
+│   ├── SpectrogramGenerator     # Generates waveform + mel spectrogram PNGs
+│   ├── SpeechToTextEngine       # Whisper STT + XLM-RoBERTa sentiment
+│   ├── SessionTracker           # Thread-safe session history management
+│   ├── EmergencyAlertManager    # Logs and retrieves emergency alerts
+│   └── Routes (10 endpoints)    # /, /api/* routes
+│
+├── model_trainer.py             # Model training script (RAVDESS dataset)
+│   ├── extract_features()       # 40 MFCC extraction
+│   ├── augment_audio()          # Time stretch, pitch shift, noise
+│   ├── load_ravdess_data()      # Dataset loader with augmentation
+│   ├── build_model()           # CNN with 3 blocks + batch norm
+│   └── train_model()           # Full training pipeline
+│
+├── templates/
+│   └── index.html               # Single-page frontend application
+│
+├── models/
+│   ├── Emotion_Voice_Detection_Model.h5   # Trained Keras CNN
+│   └── scaler.pkl                          # StandardScaler for inference
+│
+├── uploads/                     # Temp uploaded audio files (gitignored)
+│   └── *.mp3, *.webm, *.wav     # Uploaded audio files with timestamps
+│
+├── data/
+│   └── quotes.json             # (referenced, may contain quotes data)
+│
+├── requirements.txt             # Python dependencies
+│
+├── generate_pdf.py             # PDF generation script
+│
+├── Panelist_Interview_Questions.pdf       # (reference file)
+├── Panelist_Interview_Questions_with_Answers.pdf  # (reference file)
+│
+├── test_result.json            # (test output)
+│
+└── README.md                   # Project documentation
+
+================================================================================
+                         END OF DOCUMENTATION
+================================================================================
