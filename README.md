@@ -31,7 +31,7 @@ Then open:
 http://localhost:5000
 ```
 
-![DeepEmotion AI dashboard preview](docs/demo-dashboard.svg)
+![DeepEmotion AI dashboard preview](uploads/ezgif.com-animated-gif-maker.gif)
 
 The interface includes these views:
 
