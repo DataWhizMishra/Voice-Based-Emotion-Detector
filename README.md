@@ -49,8 +49,8 @@ running application.
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-username/emotion_detector.git
-cd emotion_detector
+git clone https://github.com/DataWhizMishra/Voice-Based-Emotion-Detector.git
+cd Voice-Based-Emotion-Detector
 ```
 
 ### 2. Install Python
